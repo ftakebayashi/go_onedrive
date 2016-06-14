@@ -1,0 +1,4 @@
+OneDriveAPIパッケージ
+
+ファイルの分割アップロードのみ実装中
+condrive.tomlを設定の上、confディレクトリをGOPATH直下に配置して使用してください。

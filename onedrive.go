@@ -1,10 +1,9 @@
 package onedrive
 
 import (
-	"encoding/json"
 	"fmt"
+	"github.com/antonholmquist/jason"
 	"github.com/spf13/viper"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -14,27 +13,14 @@ import (
 )
 
 type OneDrive struct {
-	Api_url       string
-	Auth_url      string
-	Token_url     string
-	Client_secret string
-	Refresh_token string
-	Client_id     string
-	Access_token  string
-	Upload_url    string
-}
-
-type TokenResponse struct {
-	Token_type    string
-	Expires_in    int
-	Scope         string
-	Access_token  string
-	Refresh_token string
-	User_id       string
-}
-
-type SessionResponse struct {
-	UploadUrl string
+	ApiUrl       string
+	AuthUrl      string
+	TokenUrl     string
+	ClientSecret string
+	RefreshToken string
+	ClientId     string
+	AccessToken  string
+	UploadUrl    string
 }
 
 // NewOneDrive comment
@@ -47,7 +33,7 @@ func NewOneDrive() *OneDrive {
 		log.Fatal("設定ファイルの読み込みに失敗しました")
 	}
 
-	return &OneDrive{
+	d := &OneDrive{
 		viper.GetString("api.api_url"),
 		viper.GetString("api.auth_url"),
 		viper.GetString("api.token_url"),
@@ -57,42 +43,36 @@ func NewOneDrive() *OneDrive {
 		"",
 		"",
 	}
+	d.CreateAccessToken()
+
+	return d
 
 }
 
-func (d *OneDrive) CreateUploadSession(itemId string, fileName string) string {
+func (d *OneDrive) CreateUploadSession(itemId string, fileName string) {
 
 	client := &http.Client{Timeout: time.Duration(10) * time.Second}
 	path := "drive/items/" + itemId + ":/" + fileName + ":/upload.createSession"
 
-	req, err := http.NewRequest("POST", d.Api_url+path, nil)
-	req.Header.Add("Authorization", "bearer "+d.Access_token)
+	req, err := http.NewRequest("POST", d.ApiUrl+path, nil)
+	req.Header.Add("Authorization", "bearer "+d.AccessToken)
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Fatal("Uploadセッション作成のAPI通信に失敗しました")
-		return ""
-	}
-
-	if resp.StatusCode != 200 {
-		b, _ := ioutil.ReadAll(resp.Body)
-		log.Printf("%s", b)
-		log.Fatal("Uploadセッションの作成が拒否されました")
-		return ""
 	}
 
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, _ := jason.NewObjectFromReader(resp.Body)
 
-	var r SessionResponse
-	err = json.Unmarshal([]byte(body), &r)
-	if err != nil {
-		log.Fatal("Uploadセッション作成時のJsonデコードができませんでした")
-		return ""
+	if resp.StatusCode != 200 {
+		log.Printf("%v\n", body)
+		log.Fatal("Uploadセッションの作成が拒否されました")
 	}
 
-	d.Upload_url = r.UploadUrl
-	return r.UploadUrl
+	url, _ := body.GetString("uploadUrl")
+	d.UploadUrl = url
+
 }
 
 func (d *OneDrive) CreateAccessToken() {
@@ -100,9 +80,9 @@ func (d *OneDrive) CreateAccessToken() {
 	client := &http.Client{Timeout: time.Duration(10) * time.Second}
 
 	values := url.Values{}
-	values.Add("client_id", d.Client_id)
-	values.Add("client_secret", d.Client_secret)
-	values.Add("refresh_token", d.Refresh_token)
+	values.Add("client_id", d.ClientId)
+	values.Add("client_secret", d.ClientSecret)
+	values.Add("refresh_token", d.RefreshToken)
 	values.Add("grant_type", "refresh_token")
 
 	req, err := http.NewRequest("POST", viper.GetString("api.token_url"), strings.NewReader(values.Encode()))
@@ -114,22 +94,18 @@ func (d *OneDrive) CreateAccessToken() {
 
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, _ := jason.NewObjectFromReader(resp.Body)
 
-	var r TokenResponse
-	err = json.Unmarshal([]byte(body), &r)
-	if err != nil {
-		log.Fatal("AccessToken作成時のJsonデコードができませんでした")
-	}
-	d.Access_token = r.Access_token
+	token, _ := body.GetString("access_token")
+	d.AccessToken = token
 }
 
 func (d *OneDrive) ResumableUpload(start int64, length int64, data string) {
 
 	client := &http.Client{}
 
-	req, err := http.NewRequest("PUT", d.Upload_url, strings.NewReader(data))
-	req.Header.Add("Authorization", "bearer "+d.Access_token)
+	req, err := http.NewRequest("PUT", d.UploadUrl, strings.NewReader(data))
+	req.Header.Add("Authorization", "bearer "+d.AccessToken)
 	req.Header.Add("Content-Length", fmt.Sprintf("%d", len(data)))
 	req.Header.Add("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+int64(len(data)-1), length))
 	resp, err := client.Do(req)
@@ -168,7 +144,41 @@ func (d *OneDrive) UploadSession(filePath string) (string, error) {
 }
 
 func (d *OneDrive) Upload(itemId string, fileName string, filePath string) {
-	d.CreateAccessToken()
 	d.CreateUploadSession(itemId, fileName)
 	d.UploadSession(filePath)
+}
+
+func (d *OneDrive) get(url string) *jason.Object {
+
+	client := &http.Client{}
+
+	req, err := http.NewRequest("GET", url, nil)
+	req.Header.Add("Authorization", "bearer "+d.AccessToken)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Printf("%#v\n", resp.Body)
+		log.Fatal("API GET に失敗しました。 \n", err)
+	}
+
+	defer resp.Body.Close()
+
+	v, _ := jason.NewObjectFromReader(resp.Body)
+	return v
+}
+
+func (d *OneDrive) GetDrive() {
+
+	url := viper.GetString("api.api_url") + "drive"
+	v := d.get(url)
+	fmt.Printf("%v\n", v)
+
+}
+
+func (d *OneDrive) GetSharedFiles() {
+
+	url := viper.GetString("api.api_url") + "drive/items/root?expand=children"
+	v := d.get(url)
+	fmt.Printf("%v\n", v)
+
 }
